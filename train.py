@@ -7,14 +7,19 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
 from trl import SFTTrainer
 from trl.trainer import ConstantLengthDataset
 
+# these can all be overriden with `train` keyword arguments
 default_training_args = dict(
-    max_steps=100000,
+    max_steps=10000,
     save_steps=250,
+    logging_steps=250,
     learning_rate=5e-5,
     lr_scheduler_type='linear',
     gradient_checkpointing=True,
+    gradient_accumulation_steps=1,
     bf16=True,
     weight_decay=0.0,
+    dataloader_drop_last=True,
+    report_to='none',
 )
 
 def chars_token_ratio(dataset, tokenizer, prompt_type):
@@ -26,7 +31,6 @@ def chars_token_ratio(dataset, tokenizer, prompt_type):
             total_tokens += len(tokenizer(text).tokens())
         else:
             total_tokens += len(tokenizer.tokenize(text))
-
     return total_characters / total_tokens
 
 def print_trainable_parameters(model):
@@ -49,30 +53,32 @@ def prepare_sample_text(prompt_type, example):
         system = 'Write gum.js javascript code to display the image or figure described below'
         return f'[INST] {system}:\n{user}\n[/INST]\n{assist}'
     else:
-        print(f'Unsupported prompt type: {prompt_type}')
+        raise Exception(f'Unsupported prompt type: {prompt_type}')
 
-def create_dataset(data_path, model_id, prompt_type, seq_length):
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    print(f'Tokens in tokenizer: {len(tokenizer)}')
+def train(
+    data_path='data/train.jsonl', output_dir='checkpoints', model_id='codellama/CodeLlama-13b-Instruct-hf',
+    prompt_type='llama', seq_length=1024, packed=False, batch_size=8, **kwargs
+):
+    # ensure output dir exists
+    os.makedirs(output_dir, exist_ok=True)
 
-    train_data = load_dataset('json', data_files=data_path)['train']
+    # load dataset
+    train_data = load_dataset('json', data_files=data_path, split='train')
+    formatting_func = lambda b: [
+        prepare_sample_text(prompt_type, {'prompt': p, 'code': c})
+        for p, c in zip(b['prompt'], b['code'])
+    ]
     print(f'Size of training dataset: {len(train_data)}')
 
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = 'right'
+    print(f'Tokens in tokenizer: {len(tokenizer)}')
+
+    # get chars per token to size estimation
     chars_per_token = chars_token_ratio(train_data, tokenizer, prompt_type)
     print(f'Character to token ratio: {chars_per_token:.2f}')
 
-    train_dataset = ConstantLengthDataset(
-        tokenizer,
-        train_data,
-        formatting_func=lambda s: prepare_sample_text(prompt_type, s),
-        infinite=True,
-        seq_length=seq_length,
-        chars_per_token=chars_per_token,
-    )
-
-    return train_dataset
-
-def run_training(model_id, output_dir, train_data, seq_length, **kwargs):
     # get run name from output_dir
     _, run_name = os.path.split(output_dir)
 
@@ -88,10 +94,10 @@ def run_training(model_id, output_dir, train_data, seq_length, **kwargs):
     # training arguments
     training_args = TrainingArguments(
         output_dir=output_dir,
-        dataloader_drop_last=True,
-        evaluation_strategy='no',
         run_name=run_name,
-        **default_training_args, **kwargs
+        evaluation_strategy='no',
+        per_device_train_batch_size=batch_size,
+        **{**default_training_args, **kwargs},
     )
 
     print(f'Loading model {model_id}')
@@ -105,8 +111,12 @@ def run_training(model_id, output_dir, train_data, seq_length, **kwargs):
         args=training_args,
         train_dataset=train_data,
         peft_config=lora_config,
+        # arguments passed to dataset
+        tokenizer=tokenizer,
+        formatting_func=formatting_func,
         max_seq_length=seq_length,
-        packing=True,
+        infinite=True,
+        packing=packed,
     )
     print_trainable_parameters(trainer.model)
 
@@ -114,12 +124,5 @@ def run_training(model_id, output_dir, train_data, seq_length, **kwargs):
     trainer.train()
 
     print('Saving last checkpoint of the model')
-    trainer.model.save_pretrained(os.path.join(output_dir, 'final_checkpoint'))
-
-def train(
-    data_path='data/train.jsonl', output_dir='checkpoints', model_id='Phind/Phind-CodeLlama-34B-v2',
-    prompt_type='alpaca', seq_length=4096
-):
-    os.makedirs(output_dir, exist_ok=True)
-    train_dataset = create_dataset(data_path, model_id, prompt_type, seq_length)
-    run_training(model_id, output_dir, train_dataset, seq_length)
+    final_path = os.path.join(output_dir, 'final_checkpoint')
+    trainer.model.save_pretrained(final_path)
