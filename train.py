@@ -1,4 +1,5 @@
 import os
+import torch
 
 from datasets import load_dataset
 from accelerate import Accelerator
@@ -25,7 +26,8 @@ default_training_args = dict(
 def chars_token_ratio(dataset, tokenizer, prompt_type):
     total_characters, total_tokens = 0, 0
     for example in dataset:
-        text = prepare_sample_text(prompt_type, example)
+        user, assist = example['prompt'], example['code']
+        text = prepare_sample_text(prompt_type, user, assist)
         total_characters += len(text)
         if tokenizer.is_fast:
             total_tokens += len(tokenizer(text).tokens())
@@ -44,8 +46,7 @@ def print_trainable_parameters(model):
         f'trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}'
     )
 
-def prepare_sample_text(prompt_type, example):
-    user, assist = example['prompt'], example['code']
+def prepare_sample_text(prompt_type, user, assist=''):
     if prompt_type == 'alpaca':
         system = 'You are an assistant that produces gum.js javascript code to display images or figures given in a text description.'
         return f'### System Prompt\n{system}\n\n### User Message\n{user}\n\n### Assistant\n{assist}'
@@ -55,9 +56,25 @@ def prepare_sample_text(prompt_type, example):
     else:
         raise Exception(f'Unsupported prompt type: {prompt_type}')
 
+def load_model_quantized(model_id, bits):
+    # sort out quantization args
+    if bits == 4:
+        bitargs = dict(
+            load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type='nf4'
+        )
+    elif bits == 8:
+        bitargs = dict(load_in_8bit=True)
+    elif bits == 16:
+        bitargs = dict(torch_dtype=torch.float16)
+    else:
+        raise Exception(f'Unsuppored quantization bits: {bits}')
+
+    # actually load model
+    return AutoModelForCausalLM.from_pretrained(model_id, device_map={'': 0}, **bitargs)
+
 def train(
     data_path='data/train.jsonl', output_dir='checkpoints', model_id='codellama/CodeLlama-13b-Instruct-hf',
-    prompt_type='llama', seq_length=1024, packed=False, batch_size=8, **kwargs
+    bits=8, prompt_type='llama', seq_length=1024, packed=False, batch_size=8, **kwargs
 ):
     # ensure output dir exists
     os.makedirs(output_dir, exist_ok=True)
@@ -65,8 +82,7 @@ def train(
     # load dataset
     train_data = load_dataset('json', data_files=data_path, split='train')
     formatting_func = lambda b: [
-        prepare_sample_text(prompt_type, {'prompt': p, 'code': c})
-        for p, c in zip(b['prompt'], b['code'])
+        prepare_sample_text(prompt_type, u, a) for u, a in zip(b['prompt'], b['code'])
     ]
     print(f'Size of training dataset: {len(train_data)}')
 
@@ -101,10 +117,9 @@ def train(
     )
 
     print(f'Loading model {model_id}')
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id, load_in_8bit=True, device_map={'': Accelerator().process_index}
-    )
+    model = load_model_quantized(model_id, bits)
 
+    # set up fine tuner
     train_data.start_iteration = 0
     trainer = SFTTrainer(
         model=model,
@@ -120,9 +135,11 @@ def train(
     )
     print_trainable_parameters(trainer.model)
 
+    # run that baby
     print('Training...')
     trainer.train()
 
+    # save final checkpoint separately
     print('Saving last checkpoint of the model')
     final_path = os.path.join(output_dir, 'final_checkpoint')
     trainer.model.save_pretrained(final_path)
