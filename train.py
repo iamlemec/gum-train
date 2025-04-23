@@ -1,6 +1,7 @@
 import os
 import torch
 
+import bitsandbytes as bnb
 from datasets import load_dataset
 from accelerate import Accelerator
 from peft import LoraConfig
@@ -10,17 +11,26 @@ from trl.trainer import ConstantLengthDataset
 
 # these can all be overriden with `train` keyword arguments
 default_training_args = dict(
-    max_steps=10000,
-    save_steps=250,
-    logging_steps=250,
-    learning_rate=5e-5,
-    lr_scheduler_type='linear',
+    max_steps=500,
+    save_steps=100,
+    logging_steps=10,
+    optim='adamw_torch',
+    lr_scheduler_type='cosine',
+    learning_rate=2e-4,
+    warmup_ratio=0.1,
     gradient_checkpointing=True,
     gradient_accumulation_steps=1,
     bf16=True,
-    weight_decay=0.0,
+    weight_decay=0.001,
     dataloader_drop_last=True,
     report_to='none',
+)
+
+# pretty good params
+default_lora_config = dict(
+    r=128,
+    lora_alpha=256,
+    lora_dropout=0.1,
 )
 
 def chars_token_ratio(dataset, tokenizer, prompt_type):
@@ -35,6 +45,16 @@ def chars_token_ratio(dataset, tokenizer, prompt_type):
             total_tokens += len(tokenizer.tokenize(text))
     return total_characters / total_tokens
 
+def prepare_sample_text(prompt_type, user, assist=''):
+    if prompt_type == 'alpaca':
+        system = 'You are an assistant that writes GUM code given a text description.'
+        return f'### System Prompt\n{system}\n\n### User Message\n{user}\n\n### Assistant\n{assist}'
+    elif prompt_type == 'llama':
+        system = 'Write GUM code to generate the following'
+        return f'[INST] {system}:\n{user}\n[/INST]\n{assist}'
+    else:
+        raise Exception(f'Unsupported prompt type: {prompt_type}')
+
 def print_trainable_parameters(model):
     trainable_params = 0
     all_param = 0
@@ -46,15 +66,25 @@ def print_trainable_parameters(model):
         f'trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}'
     )
 
-def prepare_sample_text(prompt_type, user, assist=''):
-    if prompt_type == 'alpaca':
-        system = 'You are an assistant that produces gum.js javascript code to display images or figures given in a text description.'
-        return f'### System Prompt\n{system}\n\n### User Message\n{user}\n\n### Assistant\n{assist}'
-    elif prompt_type == 'llama':
-        system = 'Write gum.js javascript code to display the image or figure described below'
-        return f'[INST] {system}:\n{user}\n[/INST]\n{assist}'
+def find_all_linear_names(model, bits):
+    # determine linear class
+    if bits == 4:
+        LinearClass = bnb.nn.Linear4bit
+    elif bits == 8:
+        LinearClass = bnb.nn.Linear8bitLt
     else:
-        raise Exception(f'Unsupported prompt type: {prompt_type}')
+        LinearClass = torch.nn.Linear
+
+    # get linear module names
+    lora_module_names = set([
+        n.split('.')[-1] for n, m in model.named_modules() if isinstance(m, LinearClass)
+    ])
+
+    # needed for 16-bit
+    if 'lm_head' in lora_module_names:
+        lora_module_names.remove('lm_head')
+
+    return list(lora_module_names)
 
 def load_model_quantized(model_id, bits):
     # sort out quantization args
@@ -74,7 +104,7 @@ def load_model_quantized(model_id, bits):
 
 def train(
     data_path='data/train.jsonl', output_dir='checkpoints', model_id='codellama/CodeLlama-13b-Instruct-hf',
-    bits=8, prompt_type='llama', seq_length=1024, packed=False, batch_size=8, **kwargs
+    bits=16, prompt_type='llama', seq_length=1024, packed=False, batch_size=8, lora_args={}, **kwargs
 ):
     # ensure output dir exists
     os.makedirs(output_dir, exist_ok=True)
@@ -98,32 +128,37 @@ def train(
     # get run name from output_dir
     _, run_name = os.path.split(output_dir)
 
-    # lora configuration
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        bias='none',
-        task_type='CAUSAL_LM',
-    )
-
     # training arguments
-    training_args = TrainingArguments(
+    training_args = {**default_training_args, **kwargs}
+    training_config = TrainingArguments(
         output_dir=output_dir,
         run_name=run_name,
         evaluation_strategy='no',
         per_device_train_batch_size=batch_size,
-        **{**default_training_args, **kwargs},
+        **training_args,
     )
 
     print(f'Loading model {model_id}')
     model = load_model_quantized(model_id, bits)
+    linear_modules = find_all_linear_names(model, bits)
+    print(f'Linear modules: {linear_modules}')
+
+    # hard coded for now
+    lora_args1 = {
+        'target_modules': linear_modules,
+        **default_lora_config, **lora_args
+    }
+    lora_config = LoraConfig(
+        bias='none',
+        task_type='CAUSAL_LM',
+        **lora_args1
+    )
 
     # set up fine tuner
     train_data.start_iteration = 0
     trainer = SFTTrainer(
         model=model,
-        args=training_args,
+        args=training_config,
         train_dataset=train_data,
         peft_config=lora_config,
         # arguments passed to dataset
