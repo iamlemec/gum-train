@@ -1,129 +1,316 @@
 # generate synthetic gum.js training data
 
-##
-## code generators
-##
-
-def s(x):
-    return f"'{x}'"
-
-def d(x):
-    return {} if x is None else x
-
-def eq(x, y):
-    return f'let {x} = {y};'
-
-def ret(x):
-    return f'return {x};'
-
-def obj(**entries):
-    if len(entries) == 0:
-        return None
-    elems = ', '.join([
-        (f'{k}: {v}' if k != v else k) for k, v in entries.items()
-    ])
-    return f'{{{elems}}}'
-
-def wobj(**entries):
-    return obj(**{
-        k: (s(v) if type(v) is str else v) for k, v in entries.items()
-    })
-
-def sattr(args):
-    if args is None:
-        return None
-    else:
-        return wobj(**args)
-
-def func(name, *args):
-    args = [a for a in args if a is not None]
-    elems = ', '.join(args)
-    return f'{name}({elems})'
+import re
+import random
 
 ##
-## text generators
+## constants
 ##
+
+INDENT = 2
+
+##
+## converters
+##
+
+def st(x):
+    return f"\"{x}\"" if type(x) is str else x
+
+def kv(k, v):
+    return k if v is True else f'{k}={{{st(v)}}}'
+
+def kvs(props):
+    return ' '.join([kv(k, v) for k, v in props.items()])
+
+def opts(args):
+    return ', '.join([st(a) for a in args if a is not None])
+
+def ind(s, n=2):
+    pad = ' ' * n
+    return '\n'.join([f'{pad}{line}' for line in s.split('\n')])
 
 def compress(s):
     c = re.sub(r'\s+', ' ', s).strip()
     return c if c != '' else None
 
-def line_desc(line_attr):
-    color = line_attr.get('stroke', '')
-    width = line_attr.get('stroke_width', '')
-    dash = line_attr.get('stroke_dasharray', '')
-    return compress(f'{width} {dash} {color}')
+def lines(*args):
+    return '\n'.join(args)
 
 ##
-## shape sampler
+## code generators
 ##
 
-def sample_shape_code(shape, shape_attr=None, place_attr=None):
-    shape_attr, place_attr = sattr(shape_attr), sattr(place_attr)
-    sval = func(shape, shape_attr)
-    if place_attr is None:
-        return ret(sval)
-    else:
-        line1 = eq('shape', sval)
-        line2 = ret(func('Place', 'shape', place_attr))
-        return '\n'.join([line1, line2])
+def eq(x, y):
+    return f'const {x} = {y}'
 
-def sample_shape_text(shape, shape_attr=None, place_attr=None):
-    ldesc = line_desc(line_attr)
-    sdesc = f'A {shape}'
-    if ldesc is not None:
-        sdesc += ' with a {ldesc} border'
+def ret(x):
+    return f'return {x}'
 
-    if place_attr is None:
-        return ret(sval)
-    else:
-        line1 = eq('shape', sval)
-        line2 = ret(func('Place', 'shape', place_attr))
-        return '\n'.join([line1, line2])
+def func(name, *args):
+    return f'{name}({opts(args)})'
 
 ##
-## portable options
+## data types
 ##
 
-twin = lambda x: (x, x)
+class Element:
+    def __init__(self, name, content=None, **props):
+        self.name = name
+        self.props = props
+        self.content = content or ''
+        self.unary = content is None
+
+    def render(self, indent=0):
+        props = kvs(self.props)
+        pad = ' ' if len(props) > 0 else ''
+        if self.unary:
+            return f'<{self.name} {props}{pad}/>'
+        else:
+            return f'<{self.name} {props}>\n{ind(self.content, indent + INDENT)}\n</{self.name}>'
+
+    def __str__(self):
+        return self.render()
+
+##
+## options and classes
+##
 
 shape_opts = [
     ('rectangle', 'Rect'),
     ('circle', 'Circle'),
     ('square', 'Square'),
     ('ellipse', 'Ellipse'),
+    ('triangle', 'Triangle'),
 ]
 
-color_opts = map(twin, [
-    'black', 'white', 'gray', 'red', 'blue', 'green', 'yellow', 'orange', 'purple'
-])
+frame_opts = [
+    ('frame', 'Frame'),
+    ('title frame', 'TitleFrame'),
+]
 
-place_opts = {
-}
+stack_opts = [
+    ('horizontal stack', 'HStack'),
+    ('vertical stack', 'VStack'),
+]
 
-line_opts = {
+color_opts = [
+    ('gray', 'gray'),
+    ('red', 'red'),
+    ('blue', 'blue'),
+    ('green', 'green'),
+    ('yellow', 'yellow'),
+    ('orange', 'orange'),
+    ('purple', 'purple'),
+]
+
+line_class = {
     'stroke': color_opts,
-    'stroke_width': [
-        ('thin', 1),
+    'stroke-width': [
         ('medium', 2),
         ('thick', 3),
         ('heavy', 5),
     ],
-    'stroke_dasharray': {
+    'stroke-dasharray': [
         ('dotted', 1),
         ('dashed', 3),
         ('long dashed', 5),
         ('dot dashed', [1, 3, 5, 3]),
         ('tight dashed', [4, 2]),
+    ],
+}
+
+place_class = {
+    'pos': [
+        ('center', [0.5, 0.5]),
+        ('top', [0.5, 0.8]),
+        ('bottom', [0.5, 0.2]),
+        ('left', [0.2, 0.5]),
+        ('right', [0.8, 0.5]),
+        ('top left', [0.25, 0.75]),
+        ('top right', [0.75, 0.75]),
+        ('bottom left', [0.25, 0.25]),
+        ('bottom right', [0.75, 0.25]),
+    ],
+    'rad': [
+        ('small', 0.1),
+        ('medium', 0.3),
+        ('large', 0.5),
+    ],
+    'rotate': [
+        ('15', 15),
+        ('45', 45),
+        ('60', 60),
+    ]
+}
+
+frame_class = {
+    'padding': [
+        ('small', 0.05),
+        ('', True),
+        ('large', 0.2),
+    ],
+    'margin': [
+        ('small', 0.05),
+        ('', True),
+        ('large', 0.2),
+    ],
+    'border': [
+        ('', True),
+        ('thick', 2),
+    ],
+    'rounded': [
+        ('small', 0.05),
+        ('', True),
+        ('large', 0.2),
+    ],
+}
+
+##
+## sample generation
+## done: shape
+## todo: stack, path, plot, text, network
+##
+
+def merge_dicts(*dicts):
+    return {k: v for d in dicts for k, v in d.items()}
+
+def sample_options(opts, zprob=0):
+    if random.random() < zprob:
+        return None
+    else:
+        return random.choice(opts)
+
+def sample_classes(classes, zprob=0):
+    # handle multi-class case
+    if type(classes) is list:
+        if len(classes) == 0:
+            return {}, {}
+        texts, codes = zip(*[
+            sample_classes(c, zprob=zprob) for c in classes
+        ])
+        return (
+            merge_dicts(*texts),
+            merge_dicts(*codes),
+        )
+
+    # sample options
+    samp0 = {
+        k: sample_options(v, zprob) for k, v in classes.items()
     }
-}
+    samp = {
+        k: v for k, v in samp0.items() if v is not None
+    }
+
+    # if no options are selected, return empty dicts
+    if len(samp) == 0:
+        return {}, {}
+
+    # convert to text/code dicts
+    text0, code0 = zip(*samp.values())
+    return (
+        dict(zip(samp.keys(), text0)),
+        dict(zip(samp.keys(), code0)),
+    )
 
 ##
-## domain specification
+## option describers
 ##
 
-makers = {
-    'shape': sample_shape,
-    'place': (place_gum, place_txt),
-}
-# 'layout', 'path', 'plot', 'text', 'network']
+def line_desc(line_attr):
+    color = line_attr.get('stroke', '')
+    width = line_attr.get('stroke-width', '')
+    dash = line_attr.get('stroke-dasharray', '')
+    adjs = compress(f'{width} {dash} {color}')
+    return f'Make it {adjs}. ' if adjs is not None else ''
+
+def place_desc(place_attr):
+    pos = place_attr.get('pos', None)
+    rad = place_attr.get('rad', None)
+    rot = place_attr.get('rotate', None)
+    desc = ''
+    if pos is not None:
+        desc += f'Place it in the {pos}. '
+    if rad is not None:
+        desc += f'Make it {rad} in size. '
+    if rot is not None:
+        desc += f'Rotate it {rot} degrees. '
+    return desc
+
+def frame_desc(frame_attr):
+    desc = ''
+    padding = frame_attr.get('padding', None)
+    margin = frame_attr.get('margin', None)
+    border = frame_attr.get('border', None)
+    rounded = frame_attr.get('rounded', None)
+    if padding is not None:
+        desc += f'Give it {padding} padding. '
+    if margin is not None:
+        desc += f'Give it {margin} margin. '
+    if border is not None:
+        desc += f'Give it {border} border. '
+    if rounded is not None:
+        desc += f'Give it {rounded} rounded. '
+    return desc
+
+##
+## simple shapes
+##
+
+def sample_shape_code(shape, **attr):
+    elem = Element(shape, **attr)
+    return elem.render()
+
+def sample_shape_text(shape, **attr):
+    sdesc = f'Draw a {shape}. '
+    ldesc = line_desc(attr)
+    pdesc = place_desc(attr)
+    return (sdesc + pdesc + ldesc).strip()
+
+def sample_shape(zprob=0.5):
+    stext, scode = sample_options(shape_opts)
+    atext, acode = sample_classes([line_class, place_class], zprob=zprob)
+    text = sample_shape_text(stext, **atext)
+    code = sample_shape_code(scode, **acode)
+    return text, code
+
+##
+## simple frames
+##
+
+def sample_frame_code(frame, ccode, **attr):
+    elem = Element(frame, content=ccode, **attr)
+    return elem.render()
+
+def sample_frame_text(frame, ctext, **attr):
+    sdesc = f'Draw a {frame}. '
+    fdesc = frame_desc(attr)
+    return (sdesc + fdesc + 'Give it the following content:\n' + ctext).strip()
+
+def sample_frame(zprob=0.5):
+    stext, scode = sample_options(frame_opts)
+    atext, acode = sample_classes([frame_class], zprob=zprob)
+    ctext, ccode = sample_shape(zprob=zprob)
+    text = sample_frame_text(stext, ctext, **atext)
+    code = sample_frame_code(scode, ccode, **acode)
+    return text, code
+
+##
+## simple stacks
+##
+
+def sample_stack_code(stack, ccodes):
+    content = '\n'.join(ccodes)
+    elem = Element(stack, content=content)
+    return elem.render()
+
+def sample_stack_text(stack, ctexts):
+    sdesc = f'Draw a {stack} with the following content:\n'
+    return (sdesc + '\n'.join(ctexts)).strip()
+
+def sample_stack(zprob=0.5):
+    stext, scode = sample_options(stack_opts)
+    snum = random.randint(2, 5)
+    ctexts, ccodes = zip(*[sample_shape(zprob=zprob) for _ in range(snum)])
+    text = sample_stack_text(stext, ctexts)
+    code = sample_stack_code(scode, ccodes)
+    return text, code

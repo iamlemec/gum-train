@@ -2,6 +2,44 @@
 
 Fine-tune a code model to produce `gum.js` code.
 
+# Data Generation
+
+## Real Images
+
+- Get some graphs / digrams / designs
+
+- Generate descriptions of the images (or prompts for generation)
+
+- Generate using those descriptions
+
+- Evaluate with below and image similarity (CLIP etc)
+
+## From Prompts
+
+- Generate images from prompts
+
+- Describe images using CLIP model
+
+- Evaluate text similarity between prompt and image description
+
+## Synthetic Images
+
+- Generate prompts systematically with known solutions
+
+- Use known code to generate images
+
+- Also evaluate on code similarity?
+
+# Objective Functions
+
+- Does it run (without errors)
+
+- Is it non-empty?
+
+- Image similarity
+
+- Length / Code format
+
 # Training Runs
 
 In general, 13B models are in 8-bit and 34B models are in 4-bit. Additionally, the batch size for 13B is 8, while the batch size for 34B is four. This is all with a 1024 max sequence length.

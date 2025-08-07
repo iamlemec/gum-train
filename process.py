@@ -1,38 +1,40 @@
 # process training data
 
-import re
+import os
 import json
 
-def parse_header(head):
-    return dict(
-        re.split(r'(?<!\\)\=', i) for i in re.split(r'(?<!\\)\|', head)
-    )
-
-def unescape_text(text):
-    return re.sub(r'(?<!\\)\\([\=\|\*_])', r'\1', text)
-
-def convert_examples(path, save=None):
+def load_example(file):
     # load in full text
-    with open(path, 'r') as f:
+    with open(file, 'r') as f:
         data = f.read()
 
-    # split into cells
-    _, *cells = re.split(r'\n\n+', data)
-    heads, bodys = zip(*[c.split('\n', maxsplit=1) for c in cells])
-    heads, = zip(*[re.match(r'^\!gum\* \[([^\]]+)\]$', h).groups() for h in heads])
+    # check if multi-line
+    if '\n' not in data or not data.startswith('//'):
+        print(f'Warning ({file}): Could not find prompt')
+        return
 
-    # parse header
-    infos = [parse_header(h) for h in heads]
-    caps = [i['caption'] for i in infos]
+    # split off first comment line
+    head, body = data.split('\n', maxsplit=1)
+    return head[2:].strip(), body.strip()
 
-    # merge data
-    data = list(zip(caps, bodys))
+def convert_docs(path, save=None):
+    # get list of files
+    files = [f for f in os.listdir(path) if f.endswith('.jsx')]
+
+    # load in full text
+    samples = [load_example(os.path.join(path, file)) for file in files]
+    samples = [s for s in samples if s is not None]
+
+    # convert to json
+    data = [
+        {'prompt': head, 'code': body}
+        for head, body in samples
+    ]
 
     # save or output
     if save is not None:
         with open(save, 'w') as f:
-            for c, b in data:
-                line = json.dumps({'prompt': c, 'code': b})
-                f.write(f'{line}\n')
+            for d in data:
+                f.write(json.dumps(d) + '\n')
     else:
         return data
