@@ -3,31 +3,11 @@
 import re
 import random
 
-##
-## constants
-##
-
-INDENT = 2
+from render import Element, Group
 
 ##
-## converters
+## code generation
 ##
-
-def st(x):
-    return f"\"{x}\"" if type(x) is str else x
-
-def kv(k, v):
-    return k if v is True else f'{k}={{{st(v)}}}'
-
-def kvs(props):
-    return ' '.join([kv(k, v) for k, v in props.items()])
-
-def opts(args):
-    return ', '.join([st(a) for a in args if a is not None])
-
-def ind(s, n=2):
-    pad = ' ' * n
-    return '\n'.join([f'{pad}{line}' for line in s.split('\n')])
 
 def compress(s):
     c = re.sub(r'\s+', ' ', s).strip()
@@ -36,40 +16,11 @@ def compress(s):
 def lines(*args):
     return '\n'.join(args)
 
-##
-## code generators
-##
-
 def eq(x, y):
     return f'const {x} = {y}'
 
 def ret(x):
     return f'return {x}'
-
-def func(name, *args):
-    return f'{name}({opts(args)})'
-
-##
-## data types
-##
-
-class Element:
-    def __init__(self, name, content=None, **props):
-        self.name = name
-        self.props = props
-        self.content = content or ''
-        self.unary = content is None
-
-    def render(self, indent=0):
-        props = kvs(self.props)
-        pad = ' ' if len(props) > 0 else ''
-        if self.unary:
-            return f'<{self.name} {props}{pad}/>'
-        else:
-            return f'<{self.name} {props}>\n{ind(self.content, indent + INDENT)}\n</{self.name}>'
-
-    def __str__(self):
-        return self.render()
 
 ##
 ## options and classes
