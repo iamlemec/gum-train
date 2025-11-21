@@ -4,14 +4,25 @@
 ## defaults
 ##
 
-MAX_SEQ_LENGTH = 2048
+# model and environment
+MODEL_NAME = 'Qwen/Qwen3-4B-Thinking-2507'
+HAIKU_ENV_PATH = '/home/doug/mlai/gum-prime/environments/haiku/haiku'
+
+# generation limits (tokens)
+MAX_PROMPT_LENGTH = 512
+MAX_SEQUENCE_LENGTH = 4096
+MAX_COMPLETION_LENGTH = MAX_SEQUENCE_LENGTH - MAX_PROMPT_LENGTH - 256
+
+# length penalty limits (characters)
+LENGTH_PENALTY_MIN = 2048
+LENGTH_PENALTY_MAX = 16384
 
 ##
 ## load peft model
 ##
 
 def load_peft_model(
-    model_name, max_seq_length=MAX_SEQ_LENGTH, load_peft=True, lora_rank=64, gpu_memory_utilization=0.5, load_in_4bit=True, fast_inference=True, random_state=3407
+    model_name, max_seq_length=MAX_SEQUENCE_LENGTH, load_peft=True, lora_rank=64, gpu_memory_utilization=0.5, load_in_4bit=False, fast_inference=True, random_state=3407
 ):
     from unsloth import FastLanguageModel
 
@@ -64,27 +75,27 @@ def load_env_module(env_path):
 ##
 
 def load_trainer(
-        model, tokenizer, dataset, reward_funcs, use_vllm=True, learning_rate=5e-6, adam_beta1=0.9, adam_beta2=0.99, weight_decay=0.1, warmup_ratio=0.1, lr_scheduler_type='cosine', optim='adamw_8bit', logging_steps=1, per_device_train_batch_size=1, gradient_accumulation_steps=4, num_generations=8, max_prompt_length=256, max_completion_length=1024, max_steps=250, save_steps=50, max_grad_norm=0.1, report_to='none', output_dir='outputs', **kwargs
+        model, tokenizer, dataset, reward_funcs, use_vllm=True, learning_rate=5e-6, importance_sampling_level='sequence', adam_beta1=0.9, adam_beta2=0.99, weight_decay=0.1, warmup_ratio=0.1, lr_scheduler_type='cosine', optim='adamw_torch', logging_steps=1, per_device_train_batch_size=1, gradient_accumulation_steps=1, num_generations=8, max_prompt_length=512, max_completion_length=MAX_COMPLETION_LENGTH, max_steps=250, save_steps=50, max_grad_norm=0.1, report_to='none', output_dir='outputs', **kwargs
     ):
     from trl import GRPOConfig, GRPOTrainer
 
     training_args = GRPOConfig(
-        use_vllm=use_vllm, learning_rate=learning_rate, adam_beta1=adam_beta1, adam_beta2=adam_beta2, weight_decay=weight_decay, warmup_ratio=warmup_ratio, lr_scheduler_type=lr_scheduler_type, optim=optim, logging_steps=logging_steps, per_device_train_batch_size=per_device_train_batch_size, gradient_accumulation_steps=gradient_accumulation_steps, num_generations=num_generations, max_prompt_length=max_prompt_length, max_completion_length=max_completion_length, max_steps=max_steps, save_steps=save_steps, max_grad_norm=max_grad_norm, report_to=report_to, output_dir=output_dir, **kwargs
+        use_vllm=use_vllm, learning_rate=learning_rate, importance_sampling_level=importance_sampling_level, adam_beta1=adam_beta1, adam_beta2=adam_beta2, weight_decay=weight_decay, warmup_ratio=warmup_ratio, lr_scheduler_type=lr_scheduler_type, optim=optim, logging_steps=logging_steps, per_device_train_batch_size=per_device_train_batch_size, gradient_accumulation_steps=gradient_accumulation_steps, num_generations=num_generations, max_prompt_length=max_prompt_length, max_completion_length=max_completion_length, max_steps=max_steps, save_steps=save_steps, max_grad_norm=max_grad_norm, report_to=report_to, output_dir=output_dir, **kwargs
     )
 
     return GRPOTrainer(
-        model = model,
-        processing_class = tokenizer,
-        reward_funcs = reward_funcs,
-        args = training_args,
-        train_dataset = dataset,
+        model=model,
+        processing_class=tokenizer,
+        reward_funcs=reward_funcs,
+        args=training_args,
+        train_dataset=dataset,
     )
 
 ##
 ## run model training
 ##
 
-def train_model(dataset, reward_funcs, model_name='Qwen/Qwen3-4B-Thinking-2507', lora_path='grpo_saved_lora', save_path='model', save_method='merged_16bit', **kwargs):
+def train_model(dataset, reward_funcs, model_name=MODEL_NAME, lora_path='grpo_saved_lora', save_path='model', save_method='merged_16bit', **kwargs):
     # load model and environment
     model, tokenizer = load_peft_model(model_name)
 
@@ -103,7 +114,7 @@ def train_model(dataset, reward_funcs, model_name='Qwen/Qwen3-4B-Thinking-2507',
 ## run inference
 ##
 
-def generate_response(model, tokenizer, system_prompt, prompt, lora_path=None, temperature=0.7, top_p=0.95, max_tokens=MAX_SEQ_LENGTH, **kwargs):
+def generate_response(model, tokenizer, system_prompt, prompt, lora_path=None, temperature=0.7, top_p=0.95, max_tokens=MAX_SEQUENCE_LENGTH, **kwargs):
     from vllm import SamplingParams
 
     lora_request = model.load_lora(lora_path) if lora_path else None
@@ -129,60 +140,51 @@ def generate_response(model, tokenizer, system_prompt, prompt, lora_path=None, t
 ## main entry point
 ##
 
-HAIKU_ENV_PATH = '/home/doug/mlai/gum-prime/environments/haiku/haiku'
+def get_responses(completions):
+    return [
+        completion[0]['content'] for completion in completions
+    ]
 
-HAIKU_SYSTEM_PROMPT = """Haikus are special types of poems with three lines. The first line has 5 syllables, the second line has 7 syllables, and the third line has 5 syllables. Generate a haiku in response to the user's prompt.
-
-Briefly outline what you will include in the haiku beforehand inside <think></think> tags. Then write out your haiku after that. Make sure the haiku is the last thing in your response."""
-
-def load_haiku(env_path=HAIKU_ENV_PATH, system_prompt=HAIKU_SYSTEM_PROMPT):
-    import verifiers as vf
-
+def load_haiku(env_path=HAIKU_ENV_PATH):
     # load environment module
     env_mod = load_env_module(env_path)
 
-    # construct reward functions
-    parser = vf.ThinkParser(extract_fn=env_mod.parse_haiku)
-    reward_format_fn = parser.get_format_reward_func()
-    def get_responses(completions):
-        return [
-            completion[0]['content'] for completion in completions
-        ]
-    def reward_format_function(completions, **kwargs):
+    # chat format + haiku reward
+    def reward_response_length(completions, **kwargs):
         responses = get_responses(completions)
         return [
-            reward_format_fn([
-                {'role': 'assistant', 'content': content}
-                for content in responses
-            ])
-        ]
-    def reward_haiku_function(completions, **kwargs):
-        responses = get_responses(completions)
-        return [
-            env_mod.reward_haiku_function(parser, content)
+            env_mod.reward_length(content, min_length=LENGTH_PENALTY_MIN, max_length=LENGTH_PENALTY_MAX)
             for content in responses
         ]
+    def reward_response_format(completions, **kwargs):
+        responses = get_responses(completions)
+        return [env_mod.reward_format(content) for content in responses]
+    def reward_haiku_counts(completions, **kwargs):
+        responses = get_responses(completions)
+        haikus = [env_mod.extract_haiku(content) for content in responses]
+        counts = [env_mod.count_haiku(haiku) for haiku in haikus]
+        return [env_mod.reward_counts(count) for count in counts]
 
     # load dataset
     dataset = env_mod.load_haiku_dataset('train')
     dataset = dataset.map(lambda x: {
         'prompt' : [
-            {'role': 'system', 'content': system_prompt},
+            {'role': 'system', 'content': env_mod.SYSTEM_PROMPT},
             {'role': 'user',   'content': x['question']},
         ],
     })
 
-    return dataset, [reward_format_function, reward_haiku_function]
+    return dataset, [reward_response_length, reward_response_format, reward_haiku_counts]
 
-def train_haiku(model_name='Qwen/Qwen3-4B-Thinking-2507', lora_path='grpo_saved_lora', save_path='model', save_method='merged_16bit', **kwargs):
+def train_haiku(
+    model_name=MODEL_NAME, env_path=HAIKU_ENV_PATH, lora_path='grpo_saved_lora', save_path='model', save_method='merged_16bit', **kwargs
+):
     # ignore nltk syllable warnings
     import warnings
     warnings.filterwarnings('ignore', category=UserWarning, module='nltk')
 
     # load dataset and reward functions
-    dataset, reward_funcs = load_haiku(
-        env_path=HAIKU_ENV_PATH, system_prompt=HAIKU_SYSTEM_PROMPT
-    )
+    dataset, reward_funcs = load_haiku(env_path=env_path)
 
     # run model training
     model, tokenizer = train_model(

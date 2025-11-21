@@ -3,11 +3,9 @@ import torch
 
 import bitsandbytes as bnb
 from datasets import load_dataset
-from accelerate import Accelerator
 from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
 from trl import SFTTrainer
-from trl.trainer import ConstantLengthDataset
 
 # these can all be overriden with `train` keyword arguments
 default_training_args = dict(
