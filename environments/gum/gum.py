@@ -1,19 +1,20 @@
 import re
 import io
+import numpy as np
 import verifiers as vf
 from PIL import Image
+from datasets import load_dataset
 
-from client import GumClient, GumError, ErrorType
+from .client import GumClient, GumError, ErrorType
+
+# gum client
+gum = GumClient()
 
 ##
-## general tools
+## system prompt
 ##
 
-def extract_code(text):
-    match = re.search(r'```jsx\n(.*?)\n```', text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return ''
+SYSTEM_PROMPT = 'You are an assistant that writes gum.jsx code given a text description.'
 
 ##
 ## reward components
@@ -28,10 +29,14 @@ REWARD_RENDER = 1
 REWARD_MASK = 1
 
 ##
-## gum client
+## general tools
 ##
 
-gum = GumClient()
+def extract_code(text):
+    match = re.search(r'```jsx\n(.*?)\n```', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return ''
 
 ##
 ## reward functions
@@ -81,9 +86,10 @@ def reward_gum(prompt, text):
 
     # convert png data to image
     image = Image.open(io.BytesIO(data))
+    pixels = np.asarray(image)
 
     # check if its empty
-    pixel_mask = image.max(1) / 255
+    pixel_mask = pixels.max(1) / 255
     tone_std = pixel_mask.std()
     if tone_std > 0.05:
         reward += REWARD_MASK
@@ -100,6 +106,13 @@ def reward_len(text, min_length=512, max_length=1024):
     return -clamp(frac, 0, 1)
 
 ##
+## dataset loading
+##
+
+def load_gum_dataset():
+    return load_dataset('json', data_files=f'data/gum.jsonl')
+
+##
 ## environment definition
 ##
 
@@ -107,6 +120,7 @@ def load_environment(
     use_thinking=True,
     min_length=2048,
     max_length=16384,
+    eval_fraction=0.1,
 ):
     # define reward functions
     def reward_gum_function(parser, completion, **kwargs):
@@ -117,14 +131,16 @@ def load_environment(
         return reward_len(reply, min_length=min_length, max_length=max_length)
 
     # load training data
-    dataset = load_haiku_dataset('train')
-    train_dataset = dataset.select(range(num_train_examples))
-    eval_dataset = dataset.select(
-        range(num_train_examples, num_train_examples + num_eval_examples)
-    )
+    dataset = load_gum_dataset('train')
+    data_size = len(dataset)
+
+    # split dataset into train and eval
+    eval_size = int(data_size * eval_fraction)
+    train_dataset = dataset.select(range(data_size - eval_size))
+    eval_dataset = dataset.select(range(data_size - eval_size, data_size))
 
     # thinking? parser
-    ParserClass = vf.ThinkParser if think else vf.Parser
+    ParserClass = vf.ThinkParser if use_thinking else vf.Parser
     parser = ParserClass()
 
     # set up haiku reward rubric

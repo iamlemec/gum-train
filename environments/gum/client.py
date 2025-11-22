@@ -70,4 +70,4 @@ class GumClient:
     def render(self, code, size=1024):
         url = f'http://{HOST}:{PORT}/render?size={size}'
         response = requests.post(url, data=code, headers={'Content-Type': 'text/plain'})
-        return parse_error(response.text)
+        return parse_error(response.content)
