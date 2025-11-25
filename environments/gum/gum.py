@@ -1,11 +1,24 @@
 import re
 import io
+import json
 import numpy as np
 import verifiers as vf
 from PIL import Image
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 
 from .client import GumClient, GumError, ErrorType
+
+##
+## notes
+##
+
+# StarVector
+# https://huggingface.co/collections/starvector/starvector-svg-datasets-svg-bench
+
+# VCode
+# https://arxiv.org/pdf/2511.02778
+
+# starvector/text2svg-stack: has lots of diagram-like SVG images with CoG-VLM generated descriptions
 
 # gum client
 gum = GumClient()
@@ -37,6 +50,16 @@ def extract_code(text):
     if match:
         return match.group(1).strip()
     return ''
+
+##
+## eval functions
+##
+
+def eval_text_image(prompt, data):
+    pass
+
+def eval_image_image(prompt, data):
+    pass
 
 ##
 ## reward functions
@@ -109,55 +132,65 @@ def reward_len(text, min_length=512, max_length=1024):
 ## dataset loading
 ##
 
-def load_gum_dataset():
-    return load_dataset('json', data_files=f'data/gum.jsonl')
+def parse_docs_code(code):
+    # check for format
+    code = code.strip()
+    if not code.startswith('\\\\'):
+        print(f'Warning: Could not find format in code: {code}')
+        return None
+
+    # get head and body
+    head, body = code.split('\n', maxsplit=1)
+    head = head[2:].strip()
+    body = body.strip()
+
+    # return dict
+    return {'prompt': head, 'answer': body}
+
+def load_gum_dataset(data_path):
+    code = json.load(data_path)
+    return Dataset.from_list([parse_docs_code(line) for line in code])
 
 ##
 ## environment definition
 ##
 
 def load_environment(
+    dataset_path=None,
     use_thinking=True,
     min_length=2048,
     max_length=16384,
-    eval_fraction=0.1,
+    **kwargs,
 ):
-    # define reward functions
-    def reward_gum_function(parser, completion, **kwargs):
-        reply = parser.parse_answer(completion)
-        return reward_gum(reply)
-    def reward_len_function(parser, completion, **kwargs):
-        reply = parser.parse_answer(completion)
-        return reward_len(reply, min_length=min_length, max_length=max_length)
-
-    # load training data
-    dataset = load_gum_dataset('train')
-    data_size = len(dataset)
-
-    # split dataset into train and eval
-    eval_size = int(data_size * eval_fraction)
-    train_dataset = dataset.select(range(data_size - eval_size))
-    eval_dataset = dataset.select(range(data_size - eval_size, data_size))
+    # load dataset
+    if dataset_path:
+        dataset = load_gum_dataset(dataset_path)
+    else:
+        dataset = load_dataset('iamlemec/gum-docs', split='train')
 
     # thinking? parser
     ParserClass = vf.ThinkParser if use_thinking else vf.Parser
     parser = ParserClass()
 
-    # set up haiku reward rubric
+    # define reward functions
+    def reward_gum_function(parser, completion, answer):
+        response = parser.parse_answer(completion)
+        return reward_gum(response, answer)
+    def reward_len_function(parser, completion, answer):
+        return reward_len(completion, min_length=min_length, max_length=max_length)
+
+    # set up reward rubric
     rubric = vf.Rubric(
         parser=parser,
-        funcs=[
-            reward_gum_function,
-            reward_len_function,
-        ],
+        funcs=[reward_gum_function, reward_len_function, parser.get_format_reward_func()],
         weights=[1.0, 1.0, 1.0],
     )
 
     # set up environment
     return vf.SingleTurnEnv(
-        dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        dataset=dataset,
         system_prompt=SYSTEM_PROMPT,
         parser=parser,
         rubric=rubric,
+        **kwargs,
     )

@@ -3,7 +3,7 @@
 import re
 import random
 
-from render import Element, Group
+from render import Element
 
 ##
 ## code generation

@@ -2,6 +2,7 @@
 
 import os
 import json
+import llm
 
 def load_example(file):
     # load in full text
@@ -38,3 +39,16 @@ def convert_docs(path, save=None):
                 f.write(json.dumps(d) + '\n')
     else:
         return data
+
+##
+## llm image description
+##
+
+PROMPT_DESCRIBE = """Describe this image in one or two sentences. This description will be passed to another LLM that will recreate it, so write as if you were telling the LLM what to do. You can ignore size information. Include details such as theme, content, color, and style."""
+
+def describe_image(image, model='gpt-5-mini'):
+    model = llm.get_model(model)
+    return model.prompt(
+        PROMPT_DESCRIBE,
+        attachments=[image],
+    )
