@@ -6,7 +6,7 @@ import verifiers as vf
 from PIL import Image
 from datasets import Dataset, load_dataset
 
-from .client import GumClient, GumError, ErrorType
+from .client import GumError, ErrorType, renderGum
 
 ##
 ## notes
@@ -19,9 +19,6 @@ from .client import GumClient, GumError, ErrorType
 # https://arxiv.org/pdf/2511.02778
 
 # starvector/text2svg-stack: has lots of diagram-like SVG images with CoG-VLM generated descriptions
-
-# gum client
-gum = GumClient()
 
 ##
 ## system prompt
@@ -73,7 +70,7 @@ def reward_gum(prompt, text):
 
     # parse code to svg
     try:
-        data = gum.render(code)
+        data = renderGum(code)
         etype = None
     except GumError as e:
         data = None
@@ -112,7 +109,7 @@ def reward_gum(prompt, text):
     pixels = np.asarray(image)
 
     # check if its empty
-    pixel_mask = pixels.max(1) / 255
+    pixel_mask = pixels.mean(axis=-1) / 255
     tone_std = pixel_mask.std()
     if tone_std > 0.05:
         reward += REWARD_MASK
@@ -126,7 +123,7 @@ def reward_gum(prompt, text):
 
 def reward_len(text, min_length=512, max_length=1024):
     frac = (len(text) - min_length) / (max_length - min_length)
-    return -clamp(frac, 0, 1)
+    return -np.clip(frac, 0, 1)
 
 ##
 ## dataset loading
