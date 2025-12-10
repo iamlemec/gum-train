@@ -1,5 +1,6 @@
 import re
 import io
+import os
 import json
 import numpy as np
 import verifiers as vf
@@ -186,7 +187,7 @@ def reward_len(text, min_length=512, max_length=1024):
 def parse_docs_code(code):
     # check for format
     code = code.strip()
-    if not code.startswith('\\\\'):
+    if not code.startswith('//'):
         print(f'Warning: Could not find format in code: {code}')
         return None
 
@@ -196,28 +197,31 @@ def parse_docs_code(code):
     body = body.strip()
 
     # return dict
-    return {'prompt': head, 'answer': body}
+    return {'question': head, 'answer': body}
 
 def load_gum_dataset(data_path):
-    code = json.load(data_path)
-    return Dataset.from_list([parse_docs_code(line) for line in code])
+    with open(data_path, 'r') as f:
+        data = json.load(f)
+    return Dataset.from_list([
+        parse_docs_code(code) for code in data.values()
+    ])
 
 ##
 ## environment definition
 ##
 
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATASET_PATH = os.path.join(MODULE_DIR, '..', '..', 'data', 'gum_docs', 'gum_docs.json')
+
 def load_environment(
-    dataset_path=None,
+    dataset_path=DATASET_PATH,
     use_thinking=True,
     min_length=2048,
     max_length=16384,
     **kwargs,
 ):
     # load dataset
-    if dataset_path:
-        dataset = load_gum_dataset(dataset_path)
-    else:
-        dataset = load_dataset('iamlemec/gum-docs', split='train')
+    dataset = load_gum_dataset(dataset_path)
 
     # thinking? parser
     ParserClass = vf.ThinkParser if use_thinking else vf.Parser
