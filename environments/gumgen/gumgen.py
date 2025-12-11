@@ -2,13 +2,14 @@ import re
 import io
 import os
 import json
+import traceback
 import numpy as np
 import verifiers as vf
 from PIL import Image
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 
 import oneping
-from gum import render, GumError, GumErrorType
+from gum import chafa, render, GumError, GumErrorType
 
 ##
 ## notes
@@ -25,16 +26,10 @@ from gum import render, GumError, GumErrorType
 # would be cool to make an ascii-art environment to test out vision based evals
 
 ##
-## system prompt
-##
-
-SYSTEM_GENERATE = 'You are an assistant that writes gum.jsx code given a text description.'
-
-##
 ## constants
 ##
 
-RENDER_PIXELS = 512
+RENDER_PIXELS = 1024
 
 ##
 ## reward components
@@ -53,6 +48,10 @@ REWARD_MASK = 1
 ## general tools
 ##
 
+def read_text(path):
+    with open(path, 'r') as f:
+        return f.read()
+
 def extract_code(text):
     match = re.search(r'```([^\n]*)\n(.*?)\n```', text, re.DOTALL)
     if match:
@@ -62,10 +61,22 @@ def extract_code(text):
         return text, False
 
 ##
-## eval functions
+## generation prompts
 ##
 
-EVALUATE_PROVIDER = 'llama-cpp'
+GENERATE_PROMPT = read_text('/home/doug/mlai/gum/src/gen/prompt.md').strip()
+GENERATE_LAUNCH = f"""
+# Generation
+
+Given a request from the user, your task will be to write gum.jsx code to satisfy it. Feel free to discuss your solution with the user, but be sure to enclose your final code in a ```jsx``` block.
+""".strip()
+GENERATE_SYSTEM = f'{GENERATE_PROMPT}\n\n{GENERATE_LAUNCH}'
+
+##
+## evaluation prompts
+##
+
+EVALUATE_ARGS = {'base_url': 'http://localhost:8081'}
 EVALUATE_SYSTEM = """Given a user request and a generated PNG image, evaluate how well the image satisfies the prompt. Use the following rubric to evaluate the image. Each of these 5 criteria is worth 1 point:
 
 - Content is fully visible
@@ -74,18 +85,22 @@ EVALUATE_SYSTEM = """Given a user request and a generated PNG image, evaluate ho
 - Aesthetically acceptable
 - Text (if any) is legible (if no text is expected, give 1 point)
 
-First, assess each criterion individually. Then give your final response as "SCORE: <score>", where <score> is an integer between 0 and 5."""
+First, assess each criterion individually, assigning a score between 0 and 1. Then give your final response (the sum of the scores) as "SCORE: <score>", where <score> is an integer between 0 and 5."""
+
+##
+## evaluation functions
+##
 
 REGEX_SCORE = r'SCORE: (\d+)'
 
 def eval_image(query, data, debug=False):
     # get the lvlm reply
     prompt = f'Assess the following image given the user query: {query}.'
-    response = oneping.reply(prompt, image=data, system=EVALUATE_SYSTEM, provider=EVALUATE_PROVIDER)
+    response = oneping.reply(prompt, image=data, system=EVALUATE_SYSTEM, **EVALUATE_ARGS)
 
     # print debug info
     if debug:
-        print(f'[DEBUG] full eval response:\n\n{response}')
+        print(f'[GUMGEN] eval:\n{response}')
 
     # try to parse the score
     try:
@@ -95,15 +110,19 @@ def eval_image(query, data, debug=False):
         assert score >= 0 and score <= 5
         return score
     except Exception as e:
-        print(f'[WARNING] score extraction failed: {e}')
+        print(f'[GUMGEN] score extraction failed: {e}')
         return 0
 
 ##
 ## reward functions
 ##
 
-def reward_gum(prompt, text):
+def reward_gum(prompt, text, debug=False):
     reward = 0
+
+    if debug:
+        print(f'[GUMGEN] prompt: {prompt}')
+        print(f'[GUMGEN] text: {text}')
 
     # extract code from text
     code, boxed = extract_code(text)
@@ -120,17 +139,26 @@ def reward_gum(prompt, text):
     data = None
     etype = None
     try:
-        data = render(code, pixels=RENDER_PIXELS)
+        data = render(code, pixels=RENDER_PIXELS, background='white')
     except GumError as e:
         etype = e.error_type
+        if debug:
+            print(f'[GUMGEN] gum error: {e}')
     except Exception as e:
         etype = GumErrorType.UNKNOWN
+        if debug:
+            print(f'[GUMGEN] unknown error: {e}')
+            print(f'[GUMGEN] {traceback.format_exc()}')
+
+    # debug? print error type
+    if debug:
+        num = len(data) if data is not None else 0
+        print(f'[GUMGEN] data length: {num}')
+        print(f'[GUMGEN] error type: {etype}')
 
     # reward based on error type
-    if etype == GumErrorType.UNKNOWN:
-        pass
-    if etype == GumErrorType.NOCODE:
-        pass
+    if etype == GumErrorType.NOCODE or etype == GumErrorType.UNKNOWN:
+        return reward
     reward += REWARD_CODE
     if etype == GumErrorType.NORETURN:
         return reward
@@ -154,6 +182,10 @@ def reward_gum(prompt, text):
     if data is None:
         return reward
 
+    # debug? print image
+    if debug:
+        chafa(data, size=50)
+
     # convert png data to image
     try:
         image = Image.open(io.BytesIO(data))
@@ -170,13 +202,13 @@ def reward_gum(prompt, text):
         reward += REWARD_MASK
 
     # use lvm critic on image
-    score = eval_image(prompt, data)
+    score = eval_image(prompt, data, debug=debug)
     reward += score
 
     # return reward
     return reward
 
-def reward_len(text, min_length=512, max_length=1024):
+def reward_len(text, min_length=256, max_length=2048):
     frac = (len(text) - min_length) / (max_length - min_length)
     return -np.clip(frac, 0, 1)
 
@@ -210,8 +242,9 @@ def load_gum_dataset(data_path):
 ## environment definition
 ##
 
-MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_PATH = os.path.join(MODULE_DIR, '..', '..', 'data', 'gum_docs', 'gum_docs.json')
+ENVIRON_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_DIR = os.path.join(ENVIRON_DIR, '..', '..')
+DATASET_PATH = os.path.join(MODULE_DIR, 'data', 'gum_docs', 'gum_docs.json')
 
 def load_environment(
     dataset_path=DATASET_PATH,
@@ -244,7 +277,7 @@ def load_environment(
     # set up environment
     return vf.SingleTurnEnv(
         dataset=dataset,
-        system_prompt=SYSTEM_GENERATE,
+        system_prompt=GENERATE_SYSTEM,
         parser=parser,
         rubric=rubric,
         **kwargs,

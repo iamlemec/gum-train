@@ -3,7 +3,8 @@
 import re
 import random
 
-from render import Element
+from gum import G
+from describe import describe_element
 
 ##
 ## code generation
